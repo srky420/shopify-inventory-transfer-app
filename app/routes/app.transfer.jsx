@@ -47,8 +47,11 @@ export const loader = async ({ request}) => {
 }
 
 export default function Transfer() {
+    // Component states
     const [products, setProducts] = useState([]);
     const [quantities, setQuantities] = useState({});
+    const [originalTotals, setOriginalTotals] = useState({});
+    const [originalQuantities, setOriginalQuantities] = useState({});
     
     const { variants, locations } = useLoaderData();
 
@@ -57,6 +60,7 @@ export default function Transfer() {
         setProducts(productsArray);
 
         const initialQuantities = {};
+        const totals = {};
         productsArray.forEach((product) => {
             product.colorGroups.forEach((colorGroup) => {
                 colorGroup.sizes.forEach((size) => {
@@ -64,12 +68,19 @@ export default function Transfer() {
                     size.inventory.forEach((qty, locIndex) => {
                         initialQuantities[size.variantId][locIndex] = qty;
                     });
+                    totals[size.variantId] = size.inventory.reduce((sum, qty) => sum + qty, 0);
                 });
             });
         });
         setQuantities(initialQuantities);
+        setOriginalQuantities(initialQuantities);
+        setOriginalTotals(totals);
+        console.log(initialQuantities);
+        console.log(productsArray);
+        console.log(totals);
     }, [variants, locations]);
 
+    // Handle quantity change for a specific variant at a specific location
     const handleQuantityChange = (variantId, locIndex, value) => {
         const parsed = parseInt(value, 10);
         setQuantities((prev) => ({
@@ -81,28 +92,37 @@ export default function Transfer() {
         }));
     };
 
+    // Get quantity for a specific variant at a specific location
     const getQuantity = (variantId, locIndex) => {
         return quantities[variantId]?.[locIndex] ?? 0;
     };
 
+    // Horizontal total for a location
     const getLocationTotal = (sizes, locIndex) => {
         return sizes.reduce((sum, size) => sum + getQuantity(size.variantId, locIndex), 0);
     };
 
+    // Total quantities for a size
     const getSizeTotal = (variantId) => {
         if (!quantities[variantId]) return 0;
         return Object.values(quantities[variantId]).reduce((sum, qty) => sum + qty, 0);
     };
 
+    // Grand total for all sizes in a column
     const getGrandTotal = (sizes) => {
         return sizes.reduce((sum, size) => sum + getSizeTotal(size.variantId), 0);
     };
 
+    // Check if quantity is balanced or not
+    const isBalanced = (variantId) => {
+        return originalTotals[variantId] === getSizeTotal(variantId);
+    }
+
     if (products.length === 0) {
         return (
-            <s-page heading="Inventory Transfer">
+            <s-page heading="Inventory Transfer" inlineSize="large">
                 <s-section>
-                    <s-paragraph>No products to display.</s-paragraph>
+                    <s-spinner accessibilityLabel="Loading" size="large-100" />
                 </s-section>
             </s-page>
         );
@@ -144,20 +164,23 @@ export default function Transfer() {
                                                     </s-table-cell>
                                                     {colorGroup.sizes.map((size) => (
                                                         <s-table-cell key={size.variantId}>
-                                                            <s-number-field
-                                                                label={`${size.size} at ${location.name}`}
-                                                                labelAccessibilityVisibility="exclusive"
-                                                                value={String(getQuantity(size.variantId, locIndex))}
-                                                                step={1}
-                                                                inputMode="numeric"
-                                                                onChange={(e) =>
-                                                                    handleQuantityChange(
-                                                                        size.variantId,
-                                                                        locIndex,
-                                                                        e.currentTarget.value
-                                                                    )
-                                                                }
-                                                            />
+                                                            <s-stack direction="inline" gap="tight" alignItems="center" inlineSize="large">
+                                                                <s-number-field
+                                                                    label={`${size.size} at ${location.name}`}
+                                                                    labelAccessibilityVisibility="exclusive"
+                                                                    value={getQuantity(size.variantId, locIndex)}
+                                                                    step={1}
+                                                                    inputMode="numeric"
+                                                                    onChange={(e) =>
+                                                                        handleQuantityChange(
+                                                                            size.variantId,
+                                                                            locIndex,
+                                                                            e.target.value
+                                                                        )
+                                                                    }
+                                                                />
+                                                                <InventoryDiff variantId={size.variantId} locIndex={locIndex} originalQuantities={originalQuantities} quantities={quantities} />
+                                                            </s-stack>
                                                         </s-table-cell>
                                                     ))}
                                                 </s-table-row>
@@ -173,8 +196,8 @@ export default function Transfer() {
                                                 </s-table-cell>
                                                 {colorGroup.sizes.map((size) => (
                                                     <s-table-cell key={size.variantId}>
-                                                        <s-text fontWeight="bold">
-                                                            {getSizeTotal(size.variantId)}
+                                                        <s-text fontWeight="bold" tone={isBalanced(size.variantId) ? "success" : "warning"}>
+                                                            {getSizeTotal(size.variantId)} {isBalanced(size.variantId) ? "✓" : "✗"}
                                                         </s-text>
                                                     </s-table-cell>
                                                 ))}
@@ -190,3 +213,23 @@ export default function Transfer() {
         </s-page>
     );
 }
+
+// Get the inventory diff between original and current quantities for a specific variant at a specific location
+const InventoryDiff = ({variantId, locIndex, originalQuantities, quantities}) => {
+    const original = originalQuantities[variantId]?.[locIndex] ?? 0;
+    const current = quantities[variantId]?.[locIndex] ?? 0;
+    const diff = current - original;
+
+    if (diff === 0) return null;
+
+    const isPositive = diff > 0;
+    return (
+        <s-badge
+            tone={isPositive ? "success" : "critical"} 
+            variant="bodySmall"
+            fontWeight="bold"
+        >
+            {isPositive ? `+${diff}` : diff}
+        </s-badge>
+    );
+};
