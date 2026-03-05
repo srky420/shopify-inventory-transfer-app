@@ -48,6 +48,7 @@ const groupVariantsByColor = (variants, locations) => {
         acc[color].push({
             size: getOptionValue(variant, "size") || variant.title,
             variantId: variant.id,
+            inventoryItemId: variant.inventoryItem.id,
             sku: variant.sku,
             // An array of available quantities, one per location.
             // inventory[i] corresponds to locations[i].

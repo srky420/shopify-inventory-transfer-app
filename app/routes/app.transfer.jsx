@@ -1,49 +1,20 @@
 import { useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
-import { useEffect, useState } from "react";
-import { batchArray, buildBatchedQuery } from "../utils/variants-batch-query";
-import { groupVariantsByProduct } from "../utils/variants-grouping";
-import { buildLocationsQuery } from "../utils/locations-query";
+import { useEffect, useMemo, useState } from "react";
+import { computeTransfers } from "../utils/compute-transfers";
+import { getInventoryTransferData } from "../services/transfer-route-data.server";
+import { InventoryDiff } from "../components/InventoryDiff";
+import { SaveTransfers } from "../components/SaveTranfers";
 
-export const loader = async ({ request}) => {
+export const loader = async ({ request }) => {
     const { admin } = await authenticate.admin(request);
 
+    // Get variant IDs from URL params
     const url = new URL(request.url);
     const variantParams = url.searchParams.get("variants_ids");
     const variantIds = variantParams ? variantParams.split(",") : [];
-    
-    if (variantIds.length === 0) {
-        return { variants: [], locations: [] };
-    }
 
-    const locationsQuery = buildLocationsQuery();
-    const locationsResponse = await admin.graphql(locationsQuery);
-    const locationsResult = await locationsResponse.json();
-    const locations = locationsResult.data.locations.nodes;
-
-    const BATCH_SIZE = 20;
-    const batches = batchArray(variantIds, BATCH_SIZE);
-    
-    const batchResults = await Promise.all(
-        batches.map(async (batch) => {
-            const query = buildBatchedQuery(batch, locations);
-            const response = await admin.graphql(query);
-            const result = await response.json();
-            return result;
-        })
-    );
-
-    const totalActualCost = batchResults.reduce((sum, result) => {
-        return sum + (result.extensions?.cost?.actualQueryCost || 0);
-    }, 0);
-    
-    console.log(`Total Query Cost: ${totalActualCost} points | Batches: ${batches.length} | Total Variants: ${variantIds.length}`);
-
-    const variants = batchResults.flatMap((result) => {
-        return Object.values(result.data).filter(Boolean);
-    });
-
-    return { variants, locations };
+    return getInventoryTransferData(admin, variantIds);
 }
 
 export default function Transfer() {
@@ -52,11 +23,19 @@ export default function Transfer() {
     const [quantities, setQuantities] = useState({});
     const [originalTotals, setOriginalTotals] = useState({});
     const [originalQuantities, setOriginalQuantities] = useState({});
-    
-    const { variants, locations } = useLoaderData();
+
+    const { locations, productsArray, salesData } = useLoaderData();
+
+    // Calculate transfers from utils function whenever quantities changed through input
+    const transfers = useMemo(
+        () => computeTransfers(originalQuantities, quantities, locations, products),
+        [originalQuantities, quantities, locations, products]
+    );
+
+    console.log('Transfers:', transfers);
 
     useEffect(() => {
-        const productsArray = groupVariantsByProduct(variants, locations);
+
         setProducts(productsArray);
 
         const initialQuantities = {};
@@ -75,10 +54,10 @@ export default function Transfer() {
         setQuantities(initialQuantities);
         setOriginalQuantities(initialQuantities);
         setOriginalTotals(totals);
-        console.log(initialQuantities);
-        console.log(productsArray);
-        console.log(totals);
-    }, [variants, locations]);
+        console.log('Quantities:', initialQuantities);
+        console.log('Products:', productsArray);
+        console.log('Total variants:', totals);
+    }, [products, locations]);
 
     // Handle quantity change for a specific variant at a specific location
     const handleQuantityChange = (variantId, locIndex, value) => {
@@ -118,6 +97,16 @@ export default function Transfer() {
         return originalTotals[variantId] === getSizeTotal(variantId);
     }
 
+    // Check if quantity is balanced for all variants
+    const isAllBalanced = () => {
+        return Object.keys(originalTotals).every((variantId) => isBalanced(variantId));
+    }
+
+    // Get the sales count for a specific color and location
+    const getSalesCount = (color, locIndex, productId) => {
+        return salesData[`${productId}-${color}`]?.[`loc_${locIndex}`]?.count || 0;
+    }
+
     if (products.length === 0) {
         return (
             <s-page heading="Inventory Transfer" inlineSize="large">
@@ -134,24 +123,39 @@ export default function Transfer() {
                 <s-section key={product.id} inlineSize="large">
                     <s-heading>{product.title}</s-heading>
 
-                    {product.colorGroups.map((colorGroup) => (
-                        <s-box key={colorGroup.color} paddingBlockStart="base">
-                            <s-text fontWeight="bold" tone="accent">
-                                Color: {colorGroup.color}
-                            </s-text>
+                    {product.colorGroups.map((colorGroup) => {
+                        const colorTransfers = transfers.filter(t => t.color === colorGroup.color);
 
-                            <s-box paddingBlockStart="tight">
-                                <s-section padding="none">
+                        return (
+                            <s-box key={colorGroup.color} paddingBlockStart="base" overflow="visible">
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end" }}>
+                                    <s-heading level="2">
+                                        Color: {colorGroup.color}
+                                    </s-heading>
+
+                                    {colorTransfers.length > 0 && (
+                                        <s-stack>
+                                            {colorTransfers.map((t, i) => (
+                                                <s-text key={i} tone="info">
+                                                    {t.color}/{t.size}: {t.quantity} Qty from {t.origin.name} to {t.destination.name}
+                                                </s-text>
+                                            ))}
+                                        </s-stack>
+                                    )}
+                                </div>
+
+                                <s-section padding="base">
                                     <s-table>
                                         <s-table-header-row>
                                             <s-table-header>Location</s-table-header>
+                                            <s-table-header format="numeric">Sold</s-table-header>
                                             <s-table-header format="numeric">Total</s-table-header>
                                             {colorGroup.sizes.map((size) => (
                                                 <s-table-header
                                                     key={size.variantId}
                                                     format="numeric"
                                                 >
-                                                    {size.size}
+                                                    <s-box>{size.size}</s-box>
                                                 </s-table-header>
                                             ))}
                                         </s-table-header-row>
@@ -160,11 +164,16 @@ export default function Transfer() {
                                                 <s-table-row key={location.id}>
                                                     <s-table-cell>{location.name}</s-table-cell>
                                                     <s-table-cell>
+                                                        <s-text tone="subdued">
+                                                            {getSalesCount(colorGroup.color, locIndex, product.id)}
+                                                        </s-text>
+                                                    </s-table-cell>
+                                                    <s-table-cell>
                                                         {getLocationTotal(colorGroup.sizes, locIndex)}
                                                     </s-table-cell>
                                                     {colorGroup.sizes.map((size) => (
                                                         <s-table-cell key={size.variantId}>
-                                                            <s-stack direction="inline" gap="tight" alignItems="center" inlineSize="large">
+                                                            <div style={{ position: 'relative' }}>
                                                                 <s-number-field
                                                                     label={`${size.size} at ${location.name}`}
                                                                     labelAccessibilityVisibility="exclusive"
@@ -180,7 +189,7 @@ export default function Transfer() {
                                                                     }
                                                                 />
                                                                 <InventoryDiff variantId={size.variantId} locIndex={locIndex} originalQuantities={originalQuantities} quantities={quantities} />
-                                                            </s-stack>
+                                                            </div>
                                                         </s-table-cell>
                                                     ))}
                                                 </s-table-row>
@@ -189,6 +198,7 @@ export default function Transfer() {
                                                 <s-table-cell>
                                                     <s-text fontWeight="bold">Totals</s-text>
                                                 </s-table-cell>
+                                                <s-table-cell></s-table-cell>
                                                 <s-table-cell>
                                                     <s-text fontWeight="bold">
                                                         {getGrandTotal(colorGroup.sizes)}
@@ -206,30 +216,12 @@ export default function Transfer() {
                                     </s-table>
                                 </s-section>
                             </s-box>
-                        </s-box>
-                    ))}
+                        );
+                    })}
                 </s-section>
             ))}
+
+            <SaveTransfers isAllBalanced={isAllBalanced()} transfers={transfers} />
         </s-page>
     );
 }
-
-// Get the inventory diff between original and current quantities for a specific variant at a specific location
-const InventoryDiff = ({variantId, locIndex, originalQuantities, quantities}) => {
-    const original = originalQuantities[variantId]?.[locIndex] ?? 0;
-    const current = quantities[variantId]?.[locIndex] ?? 0;
-    const diff = current - original;
-
-    if (diff === 0) return null;
-
-    const isPositive = diff > 0;
-    return (
-        <s-badge
-            tone={isPositive ? "success" : "critical"} 
-            variant="bodySmall"
-            fontWeight="bold"
-        >
-            {isPositive ? `+${diff}` : diff}
-        </s-badge>
-    );
-};
